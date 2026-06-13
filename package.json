@@ -1,6 +1,6 @@
 {
   "name": "infer-cmd",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "When a shell command fails, type `infer` to get an LLM-powered fix for your last command.",
   "type": "module",
   "bin": {
