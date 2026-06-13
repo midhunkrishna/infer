@@ -13,6 +13,7 @@
     "node": ">=18"
   },
   "scripts": {
+    "postinstall": "node -e \"console.log('infer-cmd: run \\u0027infer setup\\u0027 to wire your shell (one line, 10 seconds)')\" || true",
     "build": "tsup",
     "dev": "tsx src/cli.ts",
     "test": "vitest run",

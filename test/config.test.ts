@@ -44,6 +44,16 @@ describe("loadConfig", () => {
     writeFileSync(path, `[llm\nbroken`);
     expect(() => loadConfig({ INFER_CONFIG: path })).toThrow(/Failed to parse/);
   });
+
+  it("rejects a base_url without a scheme, naming the bad value", () => {
+    writeFileSync(path, `[llm]\nbase_url="llm7.io/v1"\n`);
+    expect(() => loadConfig({ INFER_CONFIG: path })).toThrow(/Invalid base_url "llm7.io\/v1"/);
+  });
+
+  it("suggests config --reset on a bad base_url", () => {
+    writeFileSync(path, `[llm]\nbase_url="not a url"\n`);
+    expect(() => loadConfig({ INFER_CONFIG: path })).toThrow(/config --reset/);
+  });
 });
 
 describe("redactedConfig", () => {

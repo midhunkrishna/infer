@@ -1,13 +1,31 @@
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { spawn, execFileSync } from "node:child_process";
+import { copyFileSync, existsSync, statSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { Command } from "commander";
 import { readCapture, sessionDir } from "./capture/session.js";
-import { configPath, loadConfig, redactedConfig } from "./config.js";
+import { configPath, DEFAULT_CONFIG_TOML, loadConfig, redactedConfig } from "./config.js";
 import { type FlowIO, runInfer } from "./flow.js";
-import { LlmError } from "./llm.js";
+import { isLocalProvider, LlmError } from "./llm.js";
 import { detectShell, initScript, type SupportedShell } from "./shell/init.js";
+import { applySetup, planSetup } from "./shell/setup.js";
 import type { RunOptions } from "./types.js";
+
+// ---- Hard environment guards (clear words instead of stack traces) --------
+const nodeMajor = Number(process.versions.node.split(".")[0]);
+if (Number.isFinite(nodeMajor) && nodeMajor < 18) {
+  process.stderr.write(
+    `infer: Node ${process.versions.node} is too old — version 18 or newer is required.\n` +
+      `Upgrade Node (https://nodejs.org) and reinstall: npm i -g infer-cmd\n`,
+  );
+  process.exit(1);
+}
+if (process.platform === "win32") {
+  process.stderr.write(
+    "infer: native Windows isn't supported — the shell integration needs zsh/bash/fish.\n" +
+      "It works great under WSL: https://learn.microsoft.com/windows/wsl/install\n",
+  );
+  process.exit(1);
+}
 
 function readLine(query: string, prefill = ""): Promise<string> {
   if (!process.stdin.isTTY) return Promise.resolve("");
@@ -61,37 +79,162 @@ async function defaultAction(opts: {
   }
 }
 
-function doctorAction() {
-  const shell = detectShell();
-  const dir =
-    process.env.INFER_DIR ??
-    (process.ppid ? sessionDir(process.ppid) : undefined);
-  const active = Boolean(process.env.INFER_DIR) && !!dir && existsSync(dir);
+// ---- infer setup -----------------------------------------------------------
+async function setupAction() {
+  const plan = planSetup();
+  const e = io.err;
+  e(`infer setup`);
+  e(`  shell    : ${plan.shell}`);
+  e(`  rc file  : ${plan.rcFile}`);
+  if (plan.alreadyInstalled) {
+    e(`\n  Already installed ✓ — open a new terminal and run \`infer doctor\`.`);
+    return;
+  }
+  e(`  will add : ${plan.line}\n`);
+  // Never modify rc files without a human explicitly confirming.
+  if (!process.stdin.isTTY) {
+    e("  Not a terminal — nothing changed. Run `infer setup` interactively,");
+    e("  or add the line above to the rc file yourself.");
+    return;
+  }
+  const ans = (await readLine("  Add this line? [Y/n] ")).trim().toLowerCase();
+  if (ans === "n" || ans === "no" || ans === "q") {
+    e("  Nothing changed. Add the line above manually whenever you like.");
+    return;
+  }
+  applySetup(plan);
+  e(`\n  Done ✓  Open a NEW terminal, run a failing command, then type \`infer\`.`);
+}
 
-  process.stderr.write(`infer doctor\n`);
-  process.stderr.write(`  detected shell : ${shell}\n`);
-  process.stderr.write(`  session dir    : ${dir ?? "(unknown)"}\n`);
-  process.stderr.write(
-    `  integration    : ${active ? "active ✓" : "NOT active ✗"}\n`,
-  );
-  if (!active) {
-    process.stderr.write(
-      `\n  Add this to your shell rc and open a new shell:\n` +
-        `    eval "$(infer init ${shell})"\n`,
+// ---- infer doctor ----------------------------------------------------------
+async function doctorAction() {
+  const e = io.err;
+  let failures = 0;
+  const ok = (msg: string) => e(`  ✓ ${msg}`);
+  const bad = (msg: string, fix: string) => {
+    failures++;
+    e(`  ✗ ${msg}`);
+    e(`      fix: ${fix}`);
+  };
+
+  e("infer doctor\n");
+
+  // 1. Runtime
+  ok(`node ${process.versions.node} on ${process.platform}`);
+
+  // 2. PATH conflicts (another tool named `infer` shadowing/shadowed)
+  try {
+    const all = execFileSync("which", ["-a", "infer"], { encoding: "utf8" })
+      .trim()
+      .split("\n")
+      .filter(Boolean);
+    const unique = [...new Set(all)];
+    if (unique.length > 1) {
+      bad(
+        `multiple \`infer\` binaries on PATH: ${unique.join(", ")}`,
+        "another tool may win — check `which infer` matches the npm one",
+      );
+    } else {
+      ok(`infer binary: ${unique[0] ?? "(this process)"}`);
+    }
+  } catch {
+    ok("infer binary on PATH (single)");
+  }
+
+  // 3. Shell integration present?
+  const shell = detectShell();
+  const plan = planSetup();
+  if (!plan.alreadyInstalled && !process.env.INFER_DIR) {
+    bad(
+      `shell integration not found in ${plan.rcFile}`,
+      "run `infer setup`, then open a new terminal",
     );
   } else {
-    process.stderr.write(
-      `  config file    : ${configPath()}\n  All good — run a failing command, then \`infer\`.\n`,
+    ok(`integration line present for ${shell}`);
+  }
+
+  // 4. Integration live in THIS shell, and actually capturing?
+  const dir =
+    process.env.INFER_DIR ?? (process.ppid ? sessionDir(process.ppid) : undefined);
+  if (!process.env.INFER_DIR || !dir || !existsSync(dir)) {
+    bad(
+      "integration not active in this shell session",
+      "open a NEW terminal (the rc line only takes effect in new shells)",
+    );
+  } else {
+    ok(`session dir: ${dir}`);
+    const cmdFile = `${dir}/cmd`;
+    if (!existsSync(cmdFile)) {
+      e("  · no command captured yet in this session — run any command, then re-check");
+    } else {
+      const age = Math.round((Date.now() - statSync(cmdFile).mtimeMs) / 1000);
+      ok(`capture is live (last command recorded ${age}s ago)`);
+    }
+  }
+
+  // 5. Config parses + URL sane
+  let cfgOk = false;
+  try {
+    const cfg = loadConfig();
+    cfgOk = true;
+    ok(`config: ${cfg.path} (provider=${cfg.llm.provider}, model=${cfg.llm.model})`);
+    if (!cfg.privacy.redact) {
+      bad("secret redaction is DISABLED in config", "set `redact = true` under [privacy]");
+    }
+    // 6. Provider reachable? Any HTTP response counts; only network errors fail.
+    if (isLocalProvider(cfg.llm.baseUrl)) {
+      ok(`provider is local (${cfg.llm.baseUrl}) — nothing leaves this machine`);
+    } else {
+      const t0 = Date.now();
+      try {
+        await fetch(`${cfg.llm.baseUrl}/models`, {
+          signal: AbortSignal.timeout(5000),
+        });
+        ok(`provider reachable: ${cfg.llm.baseUrl} (${Date.now() - t0}ms)`);
+      } catch {
+        bad(
+          `cannot reach ${cfg.llm.baseUrl}`,
+          "check your network, or the base_url in ~/.infer.toml",
+        );
+      }
+    }
+  } catch (err) {
+    bad(
+      `config is broken: ${(err as Error).message.split("\n")[0]}`,
+      "run `infer config --reset` to regenerate safe defaults",
     );
   }
+
+  e("");
+  if (failures === 0) {
+    e("  All good ✓ — run a failing command, then type `infer`.");
+  } else {
+    e(`  ${failures} problem${failures > 1 ? "s" : ""} found — apply the fixes above.`);
+    process.exitCode = 1;
+  }
+  void cfgOk;
 }
 
-function configAction() {
+// ---- infer config ----------------------------------------------------------
+function configAction(opts: { reset?: boolean }) {
+  const path = configPath();
+  if (opts.reset) {
+    if (existsSync(path)) {
+      copyFileSync(path, `${path}.bak`);
+      io.err(`backed up old config to ${path}.bak`);
+    }
+    writeFileSync(path, DEFAULT_CONFIG_TOML, { mode: 0o600 });
+    io.err(`wrote fresh defaults to ${path}`);
+    return;
+  }
   const cfg = redactedConfig(loadConfig());
-  process.stderr.write(`config file: ${cfg.path}\n`);
-  process.stderr.write(JSON.stringify({ llm: cfg.llm, capture: cfg.capture, privacy: cfg.privacy }, null, 2) + "\n");
+  io.err(`config file: ${cfg.path}`);
+  io.err(
+    JSON.stringify({ llm: cfg.llm, capture: cfg.capture, privacy: cfg.privacy }, null, 2),
+  );
 }
 
+// ---- commander wiring ------------------------------------------------------
 const program = new Command();
 program
   .name("infer")
@@ -103,20 +246,44 @@ program
   .action(defaultAction);
 
 program
+  .command("setup")
+  .description("install the shell integration into your shell rc (one line)")
+  .action(setupAction);
+
+program
   .command("init")
-  .argument("<shell>", "zsh | bash | fish")
+  .argument("[shell]", "zsh | bash | fish")
   .description("print the shell integration snippet for eval")
-  .action((shell: string) => {
+  .action((shell?: string) => {
+    if (!shell) {
+      const detected = detectShell();
+      process.stderr.write(
+        `Usage: eval "$(infer init ${detected})"   # add to your shell rc\n` +
+          `Or simply run: infer setup\n`,
+      );
+      process.exitCode = 1;
+      return;
+    }
     const s = shell as SupportedShell;
     if (s !== "zsh" && s !== "bash" && s !== "fish") {
-      process.stderr.write(`infer: unsupported shell '${shell}'. Use zsh, bash or fish.\n`);
+      process.stderr.write(
+        `infer: unsupported shell '${shell}'. Use zsh, bash or fish.\n`,
+      );
       process.exitCode = 1;
       return;
     }
     process.stdout.write(initScript(s) + "\n");
   });
 
-program.command("doctor").description("check the shell integration").action(doctorAction);
-program.command("config").description("print the resolved configuration").action(configAction);
+program
+  .command("doctor")
+  .description("diagnose the installation; non-zero exit if anything is broken")
+  .action(doctorAction);
+
+program
+  .command("config")
+  .description("print the resolved configuration")
+  .option("--reset", "back up and regenerate the default config file")
+  .action(configAction);
 
 program.parseAsync(process.argv);

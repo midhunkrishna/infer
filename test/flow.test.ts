@@ -266,7 +266,7 @@ describe("runInfer — no capture", () => {
       }),
     });
     await runInfer({ detail: false, verbose: false }, d);
-    expect(d._io.err.join("\n")).toContain('eval "$(infer init zsh)"');
+    expect(d._io.err.join("\n")).toContain("infer setup");
     expect(called).toBe(false);
   });
 

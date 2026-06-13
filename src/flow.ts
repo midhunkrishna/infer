@@ -1,3 +1,4 @@
+import { assessCommand } from "./danger.js";
 import type { LlmCallOptions } from "./llm.js";
 import {
   isLocalProvider,
@@ -51,11 +52,12 @@ export interface FlowDeps {
 
 const NO_CAPTURE_HINT = `infer: no recent command was captured.
 
-Make sure the shell integration is installed, e.g. for zsh add to ~/.zshrc:
+The one-time shell integration isn't active in this shell. To fix:
 
-  eval "$(infer init zsh)"
+  infer setup        # adds one line to your shell rc for you
 
-then open a new shell and run \`infer doctor\` to verify.`;
+then open a NEW terminal, run any failing command, and type \`infer\`.
+(\`infer doctor\` shows a full health check.)`;
 
 /** Present a fix and let the user run / edit / quit. */
 async function present(
@@ -63,19 +65,52 @@ async function present(
   deps: FlowDeps,
 ): Promise<void> {
   const { io } = deps;
-  io.err(`\n  → ${cmd}\n`);
-  // No human to confirm (piped/CI): print the suggestion, never auto-run it.
-  if (!deps.interactive) {
-    io.out(cmd);
+
+  // Firewall for the eval path: error output is attacker-influencable, so a
+  // structurally suspicious "fix" is never offered for execution at all.
+  const verdict = assessCommand(cmd);
+  if (verdict.level === "reject") {
+    io.err(
+      `\n  ⛔ The suggested fix was blocked (${verdict.reason}) — showing it for\n` +
+        `     reference only, it will NOT be offered to run:\n\n  ${cmd}`,
+    );
     return;
   }
-  const ans = (await io.prompt("  [Enter=run · e=edit · q=quit] "))
-    .trim()
-    .toLowerCase();
-  if (ans === "q") return;
+
+  io.err(`\n  → ${cmd}\n`);
+
+  // No human to confirm (piped/CI): show the suggestion, never run it. In
+  // wrapped mode stdout gets eval'd by the shell function, so use stderr.
+  if (!deps.interactive) {
+    if (deps.wrapped) io.err(`  (not run — no TTY to confirm)`);
+    else io.out(cmd);
+    return;
+  }
+
   let final = cmd;
-  if (ans === "e") final = (await io.promptEdit(cmd)).trim();
-  if (!final) return;
+  if (verdict.level === "danger") {
+    io.err(`  ⚠️  This command ${verdict.reason}.`);
+    const typed = (await io.prompt("  Type 'yes' to run it, anything else cancels: "))
+      .trim()
+      .toLowerCase();
+    if (typed !== "yes") {
+      io.err("  Cancelled.");
+      return;
+    }
+  } else {
+    const ans = (await io.prompt("  [Enter=run · e=edit · q=quit] "))
+      .trim()
+      .toLowerCase();
+    if (ans === "e") {
+      final = (await io.promptEdit(cmd)).trim();
+      if (!final) return;
+    } else if (ans !== "" && ans !== "y" && ans !== "yes") {
+      // Default-safe: ANY unrecognized answer ("no", "wtf", a typo) cancels.
+      io.err("  Cancelled.");
+      return;
+    }
+  }
+
   if (deps.wrapped) io.out(final);
   else await io.run(final);
 }

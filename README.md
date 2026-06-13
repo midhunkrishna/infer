@@ -27,20 +27,31 @@ OpenAI-compatible, or a local model anytime.
 npm i --global infer-cmd
 ```
 
-## Set up (one line)
+## Set up (10 seconds)
 
-Add the integration to your shell rc, then open a new shell:
+```sh
+infer setup
+```
+
+That detects your shell, shows you the one line it wants to add to your rc file,
+and asks before touching anything. Then open a **new** terminal. Done.
+
+<details>
+<summary>Prefer to add the line yourself?</summary>
 
 ```sh
 # zsh  → ~/.zshrc
-eval "$(infer init zsh)"
+command -v infer >/dev/null && eval "$(infer init zsh)"
 
-# bash → ~/.bashrc
-eval "$(infer init bash)"
+# bash → ~/.bashrc (macOS: ~/.bash_profile)
+command -v infer >/dev/null && eval "$(infer init bash)"
 
 # fish → ~/.config/fish/config.fish
-infer init fish | source
+command -q infer; and infer init fish | source
 ```
+
+The `command -v` guard means your shell never breaks if you uninstall infer.
+</details>
 
 > Why this is needed: a shell doesn't save a command's output anywhere. The
 > integration captures the command, its exit code, and the error you saw into a
@@ -107,9 +118,21 @@ list for more options.
 | `infer` | Suggest a fix for the last failed command. |
 | `infer --detail` / `-d` | Explain the failure, list alternatives, ask your intent, then refine. |
 | `infer --verbose` / `-v` | Log timing, connection, and the exact (redacted) LLM payload. |
+| `infer setup` | Install the shell integration for you (asks first; idempotent). |
 | `infer init <zsh\|bash\|fish>` | Print the shell integration snippet for `eval`. |
-| `infer doctor` | Check that the integration is active. |
+| `infer doctor` | Full health check with a copy-paste fix for every problem; exit 1 if broken. |
 | `infer config` | Print the resolved configuration (API key masked). |
+| `infer config --reset` | Back up and regenerate a default config (fixes broken TOML). |
+
+### Guardrails when running fixes
+
+- At the run prompt, **only Enter / `y` / `yes` runs** the command — any other
+  answer cancels. `e` edits, `q` quits.
+- Destructive suggestions (`rm -rf`, `git push --force`, `terraform destroy`,
+  `curl … | sh`, sudo, …) require typing the full word **`yes`**.
+- Multi-line fixes or fixes containing command substitution are **never offered
+  to run** — they're shown for reference only. This also defends against prompt
+  injection hiding in error output.
 
 ## Privacy & security
 

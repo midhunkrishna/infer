@@ -171,6 +171,21 @@ export async function chat(
       body: JSON.stringify(body),
     });
   } catch (err) {
+    const code = String(
+      (err as { cause?: { code?: string } })?.cause?.code ?? "",
+    );
+    if (code === "ENOTFOUND" || code === "EAI_AGAIN") {
+      throw new LlmError(
+        `Cannot resolve ${new URL(url).host} — you appear to be offline, or the ` +
+          `base_url in ~/.infer.toml has a typo.`,
+      );
+    }
+    if (code === "ECONNREFUSED") {
+      throw new LlmError(
+        `Connection refused by ${new URL(url).host} — if this is a local model, ` +
+          `make sure it's running (e.g. \`ollama serve\`); otherwise check base_url in ~/.infer.toml.`,
+      );
+    }
     throw new LlmError(
       `Could not reach ${url}: ${(err as Error).message}. Check your network or provider in ~/.infer.toml.`,
     );
@@ -181,9 +196,24 @@ export async function chat(
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
+    if (res.status === 401 || res.status === 403) {
+      throw new LlmError(
+        `${cfg.provider} rejected the API key (HTTP ${res.status}). Check api_key ` +
+          `in ~/.infer.toml (or the INFER_API_KEY environment variable).`,
+        res.status,
+      );
+    }
+    if (res.status === 404) {
+      throw new LlmError(
+        `Nothing found at ${url} (HTTP 404). The model "${cfg.model}" or the ` +
+          `base_url is probably wrong — check ~/.infer.toml (or run \`infer config --reset\`).`,
+        404,
+      );
+    }
     if (res.status === 429) {
       throw new LlmError(
-        `Rate limited by ${cfg.provider} (HTTP 429). Wait a moment or switch providers in ~/.infer.toml.`,
+        `Rate limited by ${cfg.provider} (HTTP 429) — the free tier allows a ` +
+          `limited number of requests per minute. Wait a moment or switch providers in ~/.infer.toml.`,
         429,
       );
     }

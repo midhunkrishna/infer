@@ -91,6 +91,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): InferConfig {
     maxTokens: asNumber(params.max_tokens, DEFAULTS.maxTokens),
   };
 
+  // Fail at load time with the bad value shown, not later as a cryptic
+  // fetch error.
+  if (!/^https?:\/\//i.test(provider.baseUrl)) {
+    throw new Error(
+      `Invalid base_url "${provider.baseUrl}" in ${path} — it must be a full ` +
+        `http(s) URL like "https://api.llm7.io/v1". Run \`infer config --reset\` to restore defaults.`,
+    );
+  }
+  try {
+    new URL(provider.baseUrl);
+  } catch {
+    throw new Error(
+      `Invalid base_url "${provider.baseUrl}" in ${path} — not a parseable URL. ` +
+        `Run \`infer config --reset\` to restore defaults.`,
+    );
+  }
+
   return {
     llm: provider,
     capture: { maxBytes: asNumber(capture.max_bytes, DEFAULTS.maxBytes) },
