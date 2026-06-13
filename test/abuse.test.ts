@@ -24,7 +24,7 @@ const config: InferConfig = {
     temperature: 0.2,
     maxTokens: 256,
   },
-  capture: { maxBytes: 1000 },
+  capture: { maxBytes: 1000, deny: [] },
   privacy: { redact: true },
   path: "/tmp/.infer.toml",
 };

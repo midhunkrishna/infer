@@ -13,34 +13,51 @@
 
 export type SupportedShell = "zsh" | "bash" | "fish";
 
-/** Programs whose output we must NOT route through the capture pipe. */
+/**
+ * Programs whose output we must NOT route through the capture pipe.
+ *
+ * The capture pipe makes the shell's stdout/stderr a pipe rather than a TTY.
+ * Interactive REPLs, TUIs and tools that probe isatty(stdout) then misbehave —
+ * they drop colors, disable line editing, or switch to non-interactive mode
+ * (e.g. `claude` errors "Input must be provided…"). For these we restore the
+ * real TTY for the duration of the command. infer can't meaningfully diagnose a
+ * "failed command" for an interactive session anyway, so excluding them is free.
+ *
+ * Users extend this two more ways (both ADD to this list):
+ *   - `[capture] deny = [...]` in ~/.infer.toml  (baked in per shell)
+ *   - the INFER_DENY env var, space/comma separated (per shell, at runtime)
+ */
 const INTERACTIVE_DENYLIST = [
-  "vim",
-  "nvim",
-  "vi",
-  "nano",
-  "emacs",
-  "less",
-  "more",
-  "man",
-  "top",
-  "htop",
-  "btop",
-  "fzf",
-  "ssh",
-  "tmux",
-  "screen",
-  "watch",
-  "tig",
-  "lazygit",
-  "psql",
-  "mysql",
-  "sqlite3",
-  "python",
-  "python3",
-  "node",
-  "irb",
-  "ipython",
+  // Editors
+  "vim", "nvim", "vi", "vimdiff", "nano", "emacs", "hx", "helix", "kak",
+  "micro", "joe", "ne", "ed", "pico",
+  // Pagers, manuals
+  "less", "more", "most", "man", "info",
+  // System / process monitors
+  "top", "htop", "btop", "atop", "glances", "bpytop", "gtop", "ctop", "nvtop",
+  "ncdu", "iotop",
+  // File managers
+  "ranger", "nnn", "lf", "vifm", "mc", "yazi",
+  // Terminal multiplexers & remote sessions
+  "tmux", "screen", "zellij", "ssh", "mosh", "telnet", "ftp", "sftp",
+  // Git / Docker / Kubernetes TUIs
+  "tig", "lazygit", "gitui", "lazydocker", "k9s",
+  // Database clients
+  "psql", "mysql", "mariadb", "sqlite3", "mongo", "mongosh", "redis-cli",
+  "pgcli", "mycli", "litecli",
+  // Language REPLs & interactive runtimes
+  "python", "python2", "python3", "bpython", "ptpython", "ipython",
+  "node", "deno", "bun", "irb", "pry", "lua",
+  "ghci", "iex", "erl", "clj", "clojure", "scala",
+  "R", "julia", "sbcl", "racket", "guile",
+  // Debuggers
+  "gdb", "lldb",
+  // TUI mail / chat / news / browsers
+  "mutt", "neomutt", "aerc", "irssi", "weechat", "newsboat", "w3m", "lynx", "links",
+  // Fuzzy finder, pickers, periodic refresh, TUI prompts
+  "fzf", "watch", "dialog", "whiptail",
+  // Interactive AI / agent CLIs
+  "claude", "aider", "gemini", "ollama", "llm",
 ];
 
 const ZSH = `# --- infer shell integration (zsh) ---
@@ -56,7 +73,7 @@ exec {INFER_OUT_FD}>&1 {INFER_ERR_FD}>&2
 export CLICOLOR_FORCE=1
 export FORCE_COLOR=1
 
-_infer_denylist='${INTERACTIVE_DENYLIST.join("|")}'
+_infer_denylist='__INFER_DENYLIST__'
 
 _infer_capture_on() {
   exec 1> >(command tee -a "$INFER_DIR/out" >&$INFER_OUT_FD) \\
@@ -72,13 +89,17 @@ autoload -Uz add-zsh-hook
 _infer_preexec() {
   local cmd="$1"
   case "$cmd" in
-    infer|infer\\ *) return ;;
+    # infer is transparent to capture: don't record it as the "last command",
+    # and tell precmd to leave the prior command's exit code untouched.
+    infer|infer\\ *) INFER_SELF=1; return ;;
   esac
   print -r -- "$cmd" > "$INFER_DIR/cmd"
   print -rn -- $'\\x1e' >> "$INFER_DIR/out"
   { print -r -- "cwd=$PWD"; print -r -- "shell=zsh"; } > "$INFER_DIR/meta"
   local first="\${cmd%% *}"; first="\${first##*/}"
-  if [[ "$first" =~ ^(\${_infer_denylist})$ ]]; then
+  local deny="$_infer_denylist"
+  [[ -n "$INFER_DENY" ]] && deny="$deny|\${INFER_DENY//[ ,]/|}"
+  if [[ "$first" =~ ^(\${deny})$ ]]; then
     INFER_SKIP=1
     _infer_capture_off
   fi
@@ -86,7 +107,14 @@ _infer_preexec() {
 
 _infer_precmd() {
   local code=$?
-  print -r -- "$code" > "$INFER_DIR/exit"
+  # Skip the exit write for infer's own invocation so a follow-up \`infer\`
+  # reads the real command's status — not infer's (always 0). When a fix is
+  # run, the wrapper records the fix's exit itself.
+  if [[ -n "$INFER_SELF" ]]; then
+    unset INFER_SELF
+  else
+    print -r -- "$code" > "$INFER_DIR/exit"
+  fi
   if [[ -n "$INFER_SKIP" ]]; then
     unset INFER_SKIP
     _infer_capture_on
@@ -124,8 +152,16 @@ infer() {
   local out st
   out="$(INFER_WRAPPED=1 command infer "$@")"
   st=$?
-  if [[ $st -eq 0 && -n "$out" ]]; then
+  if [[ $st -eq 0 && -n "$out" && -n "$INFER_DIR" ]]; then
+    # A fix was chosen. Record it as the new "last command" and open a fresh
+    # output segment, run it in THIS shell, then record ITS real exit code so a
+    # follow-up \`infer\` operates on the fix's result, not infer's own status.
+    print -r -- "$out" > "$INFER_DIR/cmd"
+    { print -r -- "cwd=$PWD"; print -r -- "shell=zsh"; } > "$INFER_DIR/meta"
+    print -rn -- $'\\x1e' >> "$INFER_DIR/out"
     eval "$out"
+    st=$?
+    print -r -- "$st" > "$INFER_DIR/exit"
   fi
   return $st
 }
@@ -140,7 +176,7 @@ command chmod 700 "$INFER_DIR" 2>/dev/null
 # Fixed fd numbers (21/22) for bash 3.2 compatibility (macOS default bash).
 exec 21>&1 22>&2
 
-_infer_denylist='${INTERACTIVE_DENYLIST.join("|")}'
+_infer_denylist='__INFER_DENYLIST__'
 
 _infer_capture_on() {
   exec 1> >(command tee -a "$INFER_DIR/out" >&21) \\
@@ -152,14 +188,18 @@ _infer_capture_on
 _infer_preexec() {
   local cmd="$BASH_COMMAND"
   case "$cmd" in
-    infer|infer\\ *|_infer_*|__infer*) return ;;
+    # infer is transparent to capture (see zsh notes).
+    infer|infer\\ *) INFER_SELF=1; return ;;
+    _infer_*|__infer*) return ;;
   esac
   [[ -n "$INFER_IN_PROMPT" ]] && return
   printf '%s\\n' "$cmd" > "$INFER_DIR/cmd"
   printf '\\036' >> "$INFER_DIR/out"
   { printf 'cwd=%s\\n' "$PWD"; printf 'shell=bash\\n'; } > "$INFER_DIR/meta"
   local first="\${cmd%% *}"; first="\${first##*/}"
-  if [[ "$first" =~ ^(\${_infer_denylist})$ ]]; then
+  local deny="$_infer_denylist"
+  [[ -n "$INFER_DENY" ]] && deny="$deny|\${INFER_DENY//[ ,]/|}"
+  if [[ "$first" =~ ^(\${deny})$ ]]; then
     INFER_SKIP=1
     _infer_capture_off
   fi
@@ -169,7 +209,8 @@ trap '_infer_preexec' DEBUG
 _infer_precmd() {
   local code=$?
   INFER_IN_PROMPT=1
-  printf '%s\\n' "$code" > "$INFER_DIR/exit"
+  # Don't clobber the prior command's exit with infer's own (see zsh notes).
+  if [[ -n "$INFER_SELF" ]]; then unset INFER_SELF; else printf '%s\\n' "$code" > "$INFER_DIR/exit"; fi
   if [[ -n "$INFER_SKIP" ]]; then unset INFER_SKIP; _infer_capture_on; fi
   if [[ -f "$INFER_DIR/out" ]]; then
     local sz
@@ -196,8 +237,15 @@ infer() {
   local out st
   out="$(INFER_WRAPPED=1 command infer "$@")"
   st=$?
-  if [[ $st -eq 0 && -n "$out" ]]; then
+  if [[ $st -eq 0 && -n "$out" && -n "$INFER_DIR" ]]; then
+    # Record the chosen fix as the new "last command", run it here, and record
+    # its real exit code (see zsh notes).
+    printf '%s\\n' "$out" > "$INFER_DIR/cmd"
+    { printf 'cwd=%s\\n' "$PWD"; printf 'shell=bash\\n'; } > "$INFER_DIR/meta"
+    printf '\\036' >> "$INFER_DIR/out"
     eval "$out"
+    st=$?
+    printf '%s\\n' "$st" > "$INFER_DIR/exit"
   fi
   return $st
 }
@@ -214,6 +262,8 @@ command chmod 700 "$INFER_DIR" 2>/dev/null
 function _infer_preexec --on-event fish_preexec
     switch $argv[1]
         case 'infer' 'infer *'
+            # infer is transparent to capture (see zsh notes).
+            set -g INFER_SELF 1
             return
     end
     printf '%s\\n' $argv[1] > "$INFER_DIR/cmd"
@@ -221,7 +271,11 @@ function _infer_preexec --on-event fish_preexec
 end
 
 function _infer_postexec --on-event fish_postexec
-    printf '%s\\n' $status > "$INFER_DIR/exit"
+    if set -q INFER_SELF
+        set -e INFER_SELF
+    else
+        printf '%s\\n' $status > "$INFER_DIR/exit"
+    end
 end
 
 function _infer_cleanup --on-event fish_exit
@@ -237,22 +291,45 @@ function infer
     set -l out (INFER_WRAPPED=1 command infer $argv)
     set -l st $status
     if test $st -eq 0; and test -n "$out"
-        eval (string join \\n $out)
+        set -l fix (string join \\n $out)
+        if test -n "$INFER_DIR"
+            printf '%s\\n' "$fix" > "$INFER_DIR/cmd"
+            printf 'cwd=%s\\nshell=fish\\n' "$PWD" > "$INFER_DIR/meta"
+        end
+        eval $fix
+        set st $status
+        test -n "$INFER_DIR"; and printf '%s\\n' $st > "$INFER_DIR/exit"
     end
     return $st
 end
 # --- end infer ---`;
 
-/** Return the integration script for a shell. */
-export function initScript(shell: SupportedShell): string {
-  switch (shell) {
-    case "zsh":
-      return ZSH;
-    case "bash":
-      return BASH;
-    case "fish":
-      return FISH;
-  }
+/**
+ * Same conservative charset as the config loader. initScript is the security
+ * boundary for the generated snippet, so re-validate here even though callers
+ * (loadDenyList) already sanitize: entries are interpolated inside single
+ * quotes AND a regex, and must not escape either.
+ */
+const DENY_NAME = /^[A-Za-z0-9._-]+$/;
+
+/**
+ * Return the integration script for a shell.
+ *
+ * @param extraDeny additional interactive commands (from `[capture] deny` in the
+ *   config) to merge into the built-in denylist. Ignored for fish, which has no
+ *   capture pipe and therefore no denylist. Invalid names are dropped.
+ */
+export function initScript(
+  shell: SupportedShell,
+  extraDeny: string[] = [],
+): string {
+  if (shell === "fish") return FISH;
+  const deny = [
+    ...INTERACTIVE_DENYLIST,
+    ...extraDeny.filter((n) => DENY_NAME.test(n)),
+  ].join("|");
+  const tmpl = shell === "zsh" ? ZSH : BASH;
+  return tmpl.replace("__INFER_DENYLIST__", deny);
 }
 
 /** Detect the user's shell from $SHELL; defaults to zsh. */

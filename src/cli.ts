@@ -3,7 +3,13 @@ import { copyFileSync, existsSync, statSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { Command } from "commander";
 import { readCapture, sessionDir } from "./capture/session.js";
-import { configPath, DEFAULT_CONFIG_TOML, loadConfig, redactedConfig } from "./config.js";
+import {
+  configPath,
+  DEFAULT_CONFIG_TOML,
+  loadConfig,
+  loadDenyList,
+  redactedConfig,
+} from "./config.js";
 import { type FlowIO, runInfer } from "./flow.js";
 import { isLocalProvider, LlmError } from "./llm.js";
 import { detectShell, initScript, type SupportedShell } from "./shell/init.js";
@@ -27,15 +33,32 @@ if (process.platform === "win32") {
   process.exit(1);
 }
 
+// ONE readline interface for the whole process. Creating a fresh interface per
+// prompt let a stray buffered newline (a double-tapped Enter, or input typed
+// during a network round-trip) be read by the NEXT prompt as an empty answer —
+// silently skipping the intent question, and even auto-running a suggested fix
+// (Enter = run). A single persistent interface emits such inter-prompt lines as
+// 'line' events with no active question, so they are discarded instead.
+let sharedRl: ReturnType<typeof createInterface> | null = null;
+function rl(): ReturnType<typeof createInterface> {
+  if (!sharedRl) {
+    sharedRl = createInterface({ input: process.stdin, output: process.stderr });
+  }
+  return sharedRl;
+}
+function closeReadline(): void {
+  if (sharedRl) {
+    sharedRl.close();
+    sharedRl = null;
+  }
+}
+
 function readLine(query: string, prefill = ""): Promise<string> {
   if (!process.stdin.isTTY) return Promise.resolve("");
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  const r = rl();
   return new Promise((resolve) => {
-    rl.question(query, (answer) => {
-      rl.close();
-      resolve(answer);
-    });
-    if (prefill) rl.write(prefill);
+    r.question(query, (answer) => resolve(answer));
+    if (prefill) r.write(prefill);
   });
 }
 
@@ -272,7 +295,10 @@ program
       process.exitCode = 1;
       return;
     }
-    process.stdout.write(initScript(s) + "\n");
+    // Merge the user's [capture] deny list from the config. loadDenyList is
+    // defensive (never throws / creates files) because this runs on every
+    // shell startup via `eval "$(infer init …)"`.
+    process.stdout.write(initScript(s, loadDenyList()) + "\n");
   });
 
 program
@@ -286,4 +312,6 @@ program
   .option("--reset", "back up and regenerate the default config file")
   .action(configAction);
 
-program.parseAsync(process.argv);
+// The persistent readline interface keeps stdin referenced; close it once the
+// command finishes so the process can exit cleanly.
+program.parseAsync(process.argv).finally(closeReadline);

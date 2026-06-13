@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadConfig, redactedConfig } from "../src/config.js";
+import { loadConfig, loadDenyList, redactedConfig } from "../src/config.js";
 
 describe("loadConfig", () => {
   let dir: string;
@@ -53,6 +53,45 @@ describe("loadConfig", () => {
   it("suggests config --reset on a bad base_url", () => {
     writeFileSync(path, `[llm]\nbase_url="not a url"\n`);
     expect(() => loadConfig({ INFER_CONFIG: path })).toThrow(/config --reset/);
+  });
+
+  it("parses the [capture] deny list, dropping unsafe entries", () => {
+    writeFileSync(
+      path,
+      `[capture]\ndeny = ["mytool", "python3.9", "bad name", "evil';rm -rf /", 42]\n`,
+    );
+    const cfg = loadConfig({ INFER_CONFIG: path });
+    // Spaces, shell metacharacters and non-strings are dropped.
+    expect(cfg.capture.deny).toEqual(["mytool", "python3.9"]);
+  });
+
+  it("defaults deny to an empty list when absent", () => {
+    const cfg = loadConfig({ INFER_CONFIG: path });
+    expect(cfg.capture.deny).toEqual([]);
+  });
+});
+
+describe("loadDenyList", () => {
+  let dir: string;
+  let path: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "infer-deny-"));
+    path = join(dir, ".infer.toml");
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("returns sanitized entries from the config", () => {
+    writeFileSync(path, `[capture]\ndeny = ["claude-ish", "rm -rf", "ok_tool"]\n`);
+    expect(loadDenyList({ INFER_CONFIG: path })).toEqual(["claude-ish", "ok_tool"]);
+  });
+
+  it("never throws and never creates the file (safe for shell startup)", () => {
+    // Missing file → empty, and the file must NOT be created (unlike loadConfig).
+    expect(loadDenyList({ INFER_CONFIG: path })).toEqual([]);
+    expect(existsSync(path)).toBe(false);
+    // Malformed TOML and an invalid base_url must not throw here.
+    writeFileSync(path, `[llm\nbase_url="not a url"`);
+    expect(loadDenyList({ INFER_CONFIG: path })).toEqual([]);
   });
 });
 

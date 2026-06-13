@@ -56,7 +56,8 @@ The `command -v` guard means your shell never breaks if you uninstall infer.
 > Why this is needed: a shell doesn't save a command's output anywhere. The
 > integration captures the command, its exit code, and the error you saw into a
 > small temp file so `infer` can read them. It restores the real terminal for
-> interactive programs (vim, less, ssh…) so nothing is degraded.
+> interactive programs (vim, less, ssh, REPLs, AI CLIs…) so nothing is degraded —
+> see [Interactive programs & the capture denylist](#interactive-programs--the-capture-denylist).
 
 Verify it's working:
 
@@ -168,10 +169,48 @@ sensitive work.
 Capture files live in `$XDG_STATE_HOME/infer/<pid>/` in a `0700` directory and are
 swept on shell exit and after `INFER_TTL_MIN` minutes (default 1 day).
 
+## Interactive programs & the capture denylist
+
+The integration routes your command output through a pipe so `infer` can read it.
+That pipe makes stdout look non-interactive, which breaks REPLs, TUIs, and tools
+that change behavior when stdout isn't a terminal — for example `claude` would
+error with *"Input must be provided…"*. To prevent this, `infer` keeps a
+**denylist** of programs that always run with the real terminal restored.
+
+A broad set of defaults ships built in — editors (vim, nano, emacs…), pagers
+(less, man…), monitors (htop, btop…), file managers (ranger, nnn…), multiplexers
+and remote sessions (tmux, ssh, mosh…), git/docker/k8s TUIs (lazygit, k9s…),
+database clients (psql, mysql, mongosh…), language REPLs (python, node, irb,
+ghci, iex…), debuggers (gdb, lldb), TUI mail/chat/browsers (mutt, w3m…), and AI
+CLIs (claude, aider, gemini, ollama…).
+
+To cover a tool that isn't built in, extend the list — both additions are
+**merged** with the defaults; neither replaces them:
+
+```toml
+# ~/.infer.toml — applies to every new shell
+[capture]
+deny = ["mytool", "anothertool"]
+```
+
+```sh
+# or per-shell at runtime (space- or comma-separated), e.g. in your rc:
+export INFER_DENY="mytool anothertool"
+```
+
+Names are matched against the command's basename and restricted to
+`[A-Za-z0-9._-]`; anything else is ignored. Config changes take effect in **new**
+shells (the snippet is regenerated on startup). Run `infer config` to see the
+resolved list. *(The denylist applies to zsh and bash; fish doesn't pipe output,
+so it has nothing to exclude.)*
+
 ## Troubleshooting
 
 - **"no recent command was captured"** → the integration isn't active. Run
   `infer doctor` and make sure the `eval` line is in your shell rc, then open a new shell.
+- **An interactive tool misbehaves under infer** (no colors, no prompt, "must
+  provide input…") → add its command name to `[capture] deny` or `INFER_DENY`
+  (see above), then open a new shell.
 - **Rate limited (HTTP 429)** → the free default has limits; wait a moment or
   switch providers in `~/.infer.toml`.
 - **Inside tmux without integration** → `infer` will try `tmux capture-pane` as a fallback.

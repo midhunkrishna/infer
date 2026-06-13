@@ -30,7 +30,11 @@ export interface ProviderConfig {
 /** Full resolved config. */
 export interface InferConfig {
   llm: ProviderConfig;
-  capture: { maxBytes: number };
+  capture: {
+    maxBytes: number;
+    /** Extra commands to exclude from output capture (need a real TTY). */
+    deny: string[];
+  };
   privacy: { redact: boolean };
   /** Absolute path of the config file (existing or to-be-created). */
   path: string;

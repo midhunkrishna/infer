@@ -21,6 +21,11 @@ max_tokens  = 512
 
 [capture]
 max_bytes = 65536          # max bytes of command output kept / sent
+# Commands to exclude from output capture because they need a real TTY
+# (interactive REPLs/TUIs that misbehave when stdout is a pipe). These are
+# ADDED to the built-in list (vim, less, ssh, claude, …). You can also extend
+# it per-shell at runtime with the INFER_DENY env var.
+# deny = ["mytool", "anothertool"]
 
 [privacy]
 redact = true              # scrub secrets (keys, tokens, passwords) before any network call
@@ -48,6 +53,38 @@ function asNumber(v: unknown, fallback: number): number {
 
 function asString(v: unknown, fallback: string): string {
   return typeof v === "string" ? v : fallback;
+}
+
+/**
+ * Conservative command-name charset. The denylist is interpolated into the
+ * shell snippet (inside single quotes) AND into a `[[ =~ ]]` regex, so entries
+ * must not be able to escape the quoting or inject regex metacharacters. We
+ * accept only what real command basenames use; anything else is dropped.
+ */
+const DENY_NAME = /^[A-Za-z0-9._-]+$/;
+
+function sanitizeDeny(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.filter((x): x is string => typeof x === "string" && DENY_NAME.test(x));
+}
+
+/**
+ * Read ONLY the capture denylist from the config file, defensively.
+ *
+ * `infer init` runs on every shell startup (via `eval`), so unlike loadConfig
+ * this must NEVER throw and must NEVER create the file — a config typo must not
+ * break the user's shell. Missing/invalid config simply yields no extra entries.
+ */
+export function loadDenyList(env: NodeJS.ProcessEnv = process.env): string[] {
+  try {
+    const path = configPath(env);
+    if (!existsSync(path)) return [];
+    const data = parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    const capture = (data.capture ?? {}) as Record<string, unknown>;
+    return sanitizeDeny(capture.deny);
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -110,7 +147,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): InferConfig {
 
   return {
     llm: provider,
-    capture: { maxBytes: asNumber(capture.max_bytes, DEFAULTS.maxBytes) },
+    capture: {
+      maxBytes: asNumber(capture.max_bytes, DEFAULTS.maxBytes),
+      deny: sanitizeDeny(capture.deny),
+    },
     privacy: {
       redact: typeof privacy.redact === "boolean" ? privacy.redact : DEFAULTS.redact,
     },
