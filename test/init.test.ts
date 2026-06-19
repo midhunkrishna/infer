@@ -11,8 +11,7 @@ describe("initScript", () => {
     expect(s).toContain("infer()"); // wrapper function
     expect(s).toContain("$'\\x1e'"); // segment marker
     expect(s).toContain("infer|infer\\ *"); // skip guard for infer itself
-    expect(s).toContain("INFER_TTL_MIN"); // at-rest TTL sweep
-    expect(s).toContain("-mmin"); // age-based cleanup
+    expect(s).toContain("kill -0"); // liveness-gated cleanup, not age-based
   });
 
   it("emits a bash DEBUG trap and PROMPT_COMMAND hook", () => {
@@ -63,6 +62,31 @@ describe("initScript", () => {
       expect(s).not.toContain("bad name"); // space → dropped
       expect(s).not.toContain("x';y"); // quote → dropped (no snippet escape)
       expect(s).not.toContain("__INFER_DENYLIST__"); // sentinel fully replaced
+    },
+  );
+
+  // Regression: the stale-dir sweep must never delete a *live* shell's session
+  // dir. An age-based (`-mmin`) delete that ignores liveness wedged long-lived
+  // shells — every prompt then errored on the missing cmd/out/meta/exit files.
+  it.each(["zsh", "bash"] as const)(
+    "%s: sweep is liveness-gated, never age-deletes a live dir",
+    (shell) => {
+      const s = initScript(shell);
+      expect(s).toContain("kill -0"); // reap only dead PIDs
+      expect(s).not.toContain("-mmin"); // no age-based deletion
+      expect(s).not.toContain("INFER_TTL_MIN");
+    },
+  );
+
+  // Defense-in-depth: a vanished session dir self-heals on the next command
+  // instead of erroring forever.
+  it.each(["zsh", "bash"] as const)(
+    "%s: preexec recreates a deleted session dir and re-arms capture",
+    (shell) => {
+      const s = initScript(shell);
+      expect(s).toContain('[[ -d "$INFER_DIR" ]] ||');
+      expect(s).toContain('command mkdir -p "$INFER_DIR"');
+      expect(s).toMatch(/\[\[ -d "\$INFER_DIR" \]\] \|\|[\s\S]*_infer_capture_on/);
     },
   );
 

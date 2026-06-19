@@ -2,7 +2,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadConfig, loadDenyList, redactedConfig } from "../src/config.js";
+import {
+  ensureConfigFile,
+  loadConfig,
+  loadDenyList,
+  redactedConfig,
+} from "../src/config.js";
 
 describe("loadConfig", () => {
   let dir: string;
@@ -19,8 +24,15 @@ describe("loadConfig", () => {
     expect(existsSync(path)).toBe(true);
     expect(cfg.llm.provider).toBe("llm7");
     expect(cfg.llm.baseUrl).toBe("https://api.llm7.io/v1");
+    expect(cfg.llm.model).toBe("deepseek-v4-flash");
     expect(cfg.privacy.redact).toBe(true);
     expect(cfg.capture.maxBytes).toBe(65536);
+  });
+
+  it("falls back to the default model when the file omits it", () => {
+    writeFileSync(path, `[llm]\nprovider="custom"\n`);
+    const cfg = loadConfig({ INFER_CONFIG: path });
+    expect(cfg.llm.model).toBe("deepseek-v4-flash");
   });
 
   it("parses overrides and strips trailing slash on base_url", () => {
@@ -68,6 +80,30 @@ describe("loadConfig", () => {
   it("defaults deny to an empty list when absent", () => {
     const cfg = loadConfig({ INFER_CONFIG: path });
     expect(cfg.capture.deny).toEqual([]);
+  });
+});
+
+describe("ensureConfigFile", () => {
+  let dir: string;
+  let path: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "infer-ensure-"));
+    path = join(dir, ".infer.toml");
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("creates the default config with deepseek-v4-flash when absent", () => {
+    expect(existsSync(path)).toBe(false);
+    const res = ensureConfigFile({ INFER_CONFIG: path });
+    expect(res).toEqual({ path, created: true });
+    expect(readFileSync(path, "utf8")).toContain('model    = "deepseek-v4-flash"');
+  });
+
+  it("never overwrites an existing config", () => {
+    writeFileSync(path, `[llm]\nmodel="mine"\n`);
+    const res = ensureConfigFile({ INFER_CONFIG: path });
+    expect(res).toEqual({ path, created: false });
+    expect(readFileSync(path, "utf8")).toBe(`[llm]\nmodel="mine"\n`);
   });
 });
 

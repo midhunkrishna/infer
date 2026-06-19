@@ -88,6 +88,10 @@ autoload -Uz add-zsh-hook
 
 _infer_preexec() {
   local cmd="$1"
+  # Self-heal: if our session dir vanished (a stale-dir sweep, a manual rm, a
+  # cleared XDG state dir), recreate it and re-arm the capture pipe so we don't
+  # error on every prompt. _infer_capture_on reuses the saved real-TTY fds.
+  [[ -d "$INFER_DIR" ]] || { command mkdir -p "$INFER_DIR" 2>/dev/null; command chmod 700 "$INFER_DIR" 2>/dev/null; _infer_capture_on; }
   case "$cmd" in
     # infer is transparent to capture: don't record it as the "last command",
     # and tell precmd to leave the prior command's exit code untouched.
@@ -135,12 +139,10 @@ add-zsh-hook precmd _infer_precmd
 _infer_cleanup() { command rm -rf "$INFER_DIR" 2>/dev/null; }
 add-zsh-hook zshexit _infer_cleanup
 
-# Sweep stale capture dirs: any whose shell is dead, OR older than INFER_TTL_MIN
-# minutes (default 1 day) regardless of liveness — bounds at-rest exposure for
-# long-lived shells and guards against PID reuse.
-: "\${INFER_TTL_MIN:=1440}"
-command find "\${XDG_STATE_HOME:-$HOME/.local/state}/infer" -mindepth 1 -maxdepth 1 \\
-  -type d -mmin +"$INFER_TTL_MIN" -exec rm -rf {} + 2>/dev/null
+# Sweep stale capture dirs whose owning shell is GONE. A dir is reaped only when
+# its name is a dead PID — NEVER an age-based delete, because deleting a still
+# -alive shell's dir wedges its hooks and breaks its capture pipe for the rest
+# of its life (every prompt then errors with "no such file or directory").
 for _d in "\${XDG_STATE_HOME:-$HOME/.local/state}"/infer/*(N/); do
   _p=\${_d:t}
   if [[ "$_p" == <-> ]] && ! kill -0 "$_p" 2>/dev/null; then command rm -rf "$_d"; fi
@@ -187,6 +189,8 @@ _infer_capture_on
 
 _infer_preexec() {
   local cmd="$BASH_COMMAND"
+  # Self-heal a vanished session dir (see zsh notes); re-arm the capture pipe.
+  [[ -d "$INFER_DIR" ]] || { command mkdir -p "$INFER_DIR" 2>/dev/null; command chmod 700 "$INFER_DIR" 2>/dev/null; _infer_capture_on; }
   case "$cmd" in
     # infer is transparent to capture (see zsh notes).
     infer|infer\\ *) INFER_SELF=1; return ;;
@@ -227,11 +231,18 @@ case "$PROMPT_COMMAND" in
   *) PROMPT_COMMAND="_infer_precmd\${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
 esac
 
-# Sweep capture dirs older than INFER_TTL_MIN minutes (default 1 day) to bound
-# at-rest exposure; bash has no exit hook, so rely on TTL + a cleanup on rc load.
-: "\${INFER_TTL_MIN:=1440}"
-command find "\${XDG_STATE_HOME:-$HOME/.local/state}/infer" -mindepth 1 -maxdepth 1 \\
-  -type d -mmin +"$INFER_TTL_MIN" -exec rm -rf {} + 2>/dev/null
+# Sweep stale capture dirs whose owning shell is GONE. bash has no exit hook, so
+# this rc-load sweep is the cleanup. A dir is reaped only when its name is a dead
+# PID — NEVER an age-based delete, which would wedge a still-alive shell.
+_infer_root="\${XDG_STATE_HOME:-$HOME/.local/state}/infer"
+if [[ -d "$_infer_root" ]]; then
+  for _d in "$_infer_root"/*/; do
+    [[ -d "$_d" ]] || continue
+    _p="\${_d%/}"; _p="\${_p##*/}"
+    if [[ "$_p" =~ ^[0-9]+$ ]] && ! kill -0 "$_p" 2>/dev/null; then command rm -rf "$_d"; fi
+  done
+fi
+unset _d _p _infer_root
 
 infer() {
   local out st

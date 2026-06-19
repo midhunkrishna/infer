@@ -12,7 +12,7 @@ export const DEFAULT_CONFIG_TOML = `# infer-cmd configuration
 [llm]
 provider = "llm7"
 base_url = "https://api.llm7.io/v1"
-model    = "gpt-4.1-nano"
+model    = "deepseek-v4-flash"
 api_key  = ""              # not required for llm7; can also use INFER_API_KEY env
 
 [llm.params]
@@ -34,7 +34,7 @@ redact = true              # scrub secrets (keys, tokens, passwords) before any 
 const DEFAULTS = {
   provider: "llm7",
   baseUrl: "https://api.llm7.io/v1",
-  model: "gpt-4.1-nano",
+  model: "deepseek-v4-flash",
   apiKey: "",
   temperature: 0.2,
   maxTokens: 512,
@@ -88,18 +88,26 @@ export function loadDenyList(env: NodeJS.ProcessEnv = process.env): string[] {
 }
 
 /**
+ * Create the config file with safe defaults if it does not exist. Never
+ * overwrites an existing file (a user's settings are sacred). Returns the
+ * resolved path and whether the file was just created.
+ */
+export function ensureConfigFile(
+  env: NodeJS.ProcessEnv = process.env,
+): { path: string; created: boolean } {
+  const path = configPath(env);
+  if (existsSync(path)) return { path, created: false };
+  writeFileSync(path, DEFAULT_CONFIG_TOML, { mode: 0o600 });
+  return { path, created: true };
+}
+
+/**
  * Load config, generating the default file on first run. Applies env overrides:
  * INFER_API_KEY wins over the file's api_key.
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): InferConfig {
-  const path = configPath(env);
-  let raw = "";
-  if (existsSync(path)) {
-    raw = readFileSync(path, "utf8");
-  } else {
-    writeFileSync(path, DEFAULT_CONFIG_TOML, { mode: 0o600 });
-    raw = DEFAULT_CONFIG_TOML;
-  }
+  const { path } = ensureConfigFile(env);
+  const raw = readFileSync(path, "utf8");
 
   let data: Record<string, unknown>;
   try {

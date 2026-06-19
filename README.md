@@ -85,13 +85,14 @@ If `infer` can't confidently fix the command, it automatically falls back to the
 
 ## Switching LLM providers
 
-The default uses **LLM7.io** — free, no key, no signup. To change models or
-providers, edit `~/.infer.toml` (created automatically on first run). Any
-**OpenAI-compatible** `/chat/completions` endpoint works.
+The default uses **LLM7.io** with `model="deepseek-v4-flash"` — free, no key, no
+signup. To change models or providers, edit `~/.infer.toml` (created by `infer
+setup`, or automatically on first run). Any **OpenAI-compatible**
+`/chat/completions` endpoint works.
 
 | Provider | Free? | `base_url` | Notes |
 |---|---|---|---|
-| **LLM7** (default) | no signup, no key | `https://api.llm7.io/v1` | 30 req/min |
+| **LLM7** (default) | no signup, no key | `https://api.llm7.io/v1` | 30 req/min; `model="deepseek-v4-flash"` |
 | **Groq** | free key | `https://api.groq.com/openai/v1` | very fast; `model="llama-3.3-70b-versatile"` |
 | **OVHcloud** | no key | `https://oai.endpoints.kepler.ai.cloud.ovh.net/v1` | EU-hosted; ~2 req/min |
 | **OpenRouter** | free tier | `https://openrouter.ai/api/v1` | many free models |
@@ -119,7 +120,7 @@ list for more options.
 | `infer` | Suggest a fix for the last failed command. |
 | `infer --detail` / `-d` | Explain the failure, list alternatives, ask your intent, then refine. |
 | `infer --verbose` / `-v` | Log timing, connection, and the exact (redacted) LLM payload. |
-| `infer setup` | Install the shell integration for you (asks first; idempotent). |
+| `infer setup` | Install the shell integration and create `~/.infer.toml` (asks first; idempotent). |
 | `infer init <zsh\|bash\|fish>` | Print the shell integration snippet for `eval`. |
 | `infer doctor` | Full health check with a copy-paste fix for every problem; exit 1 if broken. |
 | `infer config` | Print the resolved configuration (API key masked). |
